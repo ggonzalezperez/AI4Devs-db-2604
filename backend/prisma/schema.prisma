@@ -14,26 +14,82 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ---------------------------------------------------------------------------
+// Enums
+// Normalizamos los campos de "estado" / "tipo" con valores acotados usando
+// enums nativos de PostgreSQL. Esto evita strings libres (typos, valores
+// inconsistentes) y aporta integridad de datos a nivel de motor (CHECK
+// implícito), en lugar de columnas `string` como en el ERD original.
+// ---------------------------------------------------------------------------
+
+enum EmployeeRole {
+  RECRUITER
+  HIRING_MANAGER
+  INTERVIEWER
+  ADMIN
+}
+
+enum PositionStatus {
+  DRAFT
+  OPEN
+  PAUSED
+  CLOSED
+  ARCHIVED
+}
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  INTERNSHIP
+  TEMPORARY
+  FREELANCE
+}
+
+enum ApplicationStatus {
+  RECEIVED
+  REVIEWING
+  INTERVIEW
+  OFFER
+  HIRED
+  REJECTED
+  WITHDRAWN
+}
+
+enum InterviewResult {
+  PENDING
+  PASSED
+  FAILED
+  NO_SHOW
+}
+
+// ---------------------------------------------------------------------------
+// Candidatos (entidad ya existente, ampliada con la relación a Application)
+// ---------------------------------------------------------------------------
+
 model Candidate {
-  id                Int               @id @default(autoincrement())
-  firstName         String            @db.VarChar(100)
-  lastName          String            @db.VarChar(100)
-  email             String            @unique @db.VarChar(255)
-  phone             String?           @db.VarChar(15)
-  address           String?           @db.VarChar(100)
-  educations        Education[]
-  workExperiences   WorkExperience[]
-  resumes           Resume[]
+  id              Int              @id @default(autoincrement())
+  firstName       String           @db.VarChar(100)
+  lastName        String           @db.VarChar(100)
+  email           String           @unique @db.VarChar(255)
+  phone           String?          @db.VarChar(15)
+  address         String?          @db.VarChar(100)
+  educations      Education[]
+  workExperiences WorkExperience[]
+  resumes         Resume[]
+  applications    Application[]
 }
 
 model Education {
-  id            Int       @id @default(autoincrement())
-  institution   String    @db.VarChar(100)
-  title         String    @db.VarChar(250)
-  startDate     DateTime
-  endDate       DateTime?
-  candidateId   Int
-  candidate     Candidate @relation(fields: [candidateId], references: [id])
+  id          Int       @id @default(autoincrement())
+  institution String    @db.VarChar(100)
+  title       String    @db.VarChar(250)
+  startDate   DateTime
+  endDate     DateTime?
+  candidateId Int
+  candidate   Candidate @relation(fields: [candidateId], references: [id])
+
+  @@index([candidateId])
 }
 
 model WorkExperience {
@@ -45,6 +101,8 @@ model WorkExperience {
   endDate     DateTime?
   candidateId Int
   candidate   Candidate @relation(fields: [candidateId], references: [id])
+
+  @@index([candidateId])
 }
 
 model Resume {
@@ -54,4 +112,138 @@ model Resume {
   uploadDate  DateTime
   candidateId Int
   candidate   Candidate @relation(fields: [candidateId], references: [id])
+
+  @@index([candidateId])
+}
+
+// ---------------------------------------------------------------------------
+// Empresa y empleados
+// ---------------------------------------------------------------------------
+
+model Company {
+  id        Int        @id @default(autoincrement())
+  name      String     @unique @db.VarChar(150)
+  employees Employee[]
+  positions Position[]
+}
+
+model Employee {
+  id         Int          @id @default(autoincrement())
+  companyId  Int
+  name       String       @db.VarChar(150)
+  email      String       @unique @db.VarChar(255)
+  role       EmployeeRole @default(INTERVIEWER)
+  isActive   Boolean      @default(true)
+  company    Company      @relation(fields: [companyId], references: [id])
+  interviews Interview[]
+
+  @@index([companyId])
+  @@index([isActive])
+}
+
+// ---------------------------------------------------------------------------
+// Flujos de entrevista (reutilizables) y sus pasos
+// ---------------------------------------------------------------------------
+
+model InterviewFlow {
+  id             Int             @id @default(autoincrement())
+  description    String          @db.VarChar(255)
+  interviewSteps InterviewStep[]
+  positions      Position[]
+}
+
+model InterviewType {
+  id             Int             @id @default(autoincrement())
+  name           String          @unique @db.VarChar(100)
+  description    String?         @db.Text
+  interviewSteps InterviewStep[]
+}
+
+model InterviewStep {
+  id              Int           @id @default(autoincrement())
+  interviewFlowId Int
+  interviewTypeId Int
+  name            String        @db.VarChar(150)
+  orderIndex      Int
+  interviewFlow   InterviewFlow @relation(fields: [interviewFlowId], references: [id])
+  interviewType   InterviewType @relation(fields: [interviewTypeId], references: [id])
+  interviews      Interview[]
+
+  // Un mismo flujo no puede tener dos pasos con el mismo orden.
+  @@unique([interviewFlowId, orderIndex])
+  @@index([interviewFlowId])
+  @@index([interviewTypeId])
+}
+
+// ---------------------------------------------------------------------------
+// Posiciones (ofertas de empleo)
+// ---------------------------------------------------------------------------
+
+model Position {
+  id                  Int             @id @default(autoincrement())
+  companyId           Int
+  interviewFlowId     Int
+  title               String          @db.VarChar(200)
+  description         String?         @db.Text
+  status              PositionStatus  @default(DRAFT)
+  isVisible           Boolean         @default(false)
+  location            String?         @db.VarChar(150)
+  jobDescription      String?         @db.Text
+  requirements        String?         @db.Text
+  responsibilities    String?         @db.Text
+  salaryMin           Decimal?        @db.Decimal(12, 2)
+  salaryMax           Decimal?        @db.Decimal(12, 2)
+  employmentType      EmploymentType?
+  benefits            String?         @db.Text
+  companyDescription  String?         @db.Text
+  applicationDeadline DateTime?       @db.Date
+  contactInfo         String?         @db.VarChar(255)
+  company             Company         @relation(fields: [companyId], references: [id])
+  interviewFlow       InterviewFlow   @relation(fields: [interviewFlowId], references: [id])
+  applications        Application[]
+
+  @@index([companyId])
+  @@index([interviewFlowId])
+  // Consulta habitual: ofertas abiertas y visibles en el portal público.
+  @@index([status, isVisible])
+}
+
+// ---------------------------------------------------------------------------
+// Candidaturas y entrevistas
+// ---------------------------------------------------------------------------
+
+model Application {
+  id              Int               @id @default(autoincrement())
+  positionId      Int
+  candidateId     Int
+  applicationDate DateTime          @default(now()) @db.Date
+  status          ApplicationStatus @default(RECEIVED)
+  notes           String?           @db.Text
+  position        Position          @relation(fields: [positionId], references: [id])
+  candidate       Candidate         @relation(fields: [candidateId], references: [id])
+  interviews      Interview[]
+
+  // Un candidato no puede aplicar dos veces a la misma posición.
+  @@unique([positionId, candidateId])
+  @@index([positionId])
+  @@index([candidateId])
+  @@index([status])
+}
+
+model Interview {
+  id              Int             @id @default(autoincrement())
+  applicationId   Int
+  interviewStepId Int
+  employeeId      Int
+  interviewDate   DateTime        @db.Date
+  result          InterviewResult @default(PENDING)
+  score           Int?
+  notes           String?         @db.Text
+  application     Application     @relation(fields: [applicationId], references: [id])
+  interviewStep   InterviewStep   @relation(fields: [interviewStepId], references: [id])
+  employee        Employee        @relation(fields: [employeeId], references: [id])
+
+  @@index([applicationId])
+  @@index([interviewStepId])
+  @@index([employeeId])
 }
