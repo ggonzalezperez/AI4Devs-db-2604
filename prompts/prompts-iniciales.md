@@ -1,81 +1,81 @@
-# Prompts iniciales — Ampliación del modelo de datos LTI (Módulo 8: Bases de Datos)
+# Initial prompts — Expanding the LTI data model (Module 8: Databases)
 
-> Bitácora técnica de los prompts y pasos que he seguido para convertir el ERD
-> (formato Mermaid) en un modelo **Prisma** + **migración SQL de PostgreSQL**,
-> aplicando normalización (hasta 3FN/BCNF), índices y restricciones de
-> integridad (FK, UNIQUE, CHECK, ENUM).
+> Technical log of the prompts and steps I followed to turn the ERD (Mermaid
+> format) into a **Prisma** model + a **PostgreSQL SQL migration**, applying
+> normalization (up to 3NF/BCNF), indexes and integrity constraints
+> (FK, UNIQUE, CHECK, ENUM).
 >
 > **Stack:** PostgreSQL 17 (Docker) · Prisma 5.19 · Node 24 · TypeScript.
-> Conexión verificada con `psql`/PGAdmin contra `localhost:5432/LTIdb` usando
-> las credenciales de `.env`.
+> Connection verified with `psql`/PGAdmin against `localhost:5432/LTIdb` using
+> the credentials from `.env`.
 >
-> **Metodología — bucle de doble pasada.** Cada paso lo ejecuto en dos pasadas:
-> (1) producir el artefacto, (2) revisión crítica adversarial *"¿qué falta?,
-> ¿qué viola una forma normal?, ¿qué índice sobra o falta?, ¿hay DDL
-> destructivo?"*. Las mejoras de la 2ª pasada van marcadas con 🔁.
+> **Methodology — two-pass loop.** I run each step in two passes:
+> (1) produce the artifact, (2) adversarial critical review *"what's missing?,
+> what violates a normal form?, which index is redundant or missing?, is there
+> destructive DDL?"*. Improvements from the 2nd pass are marked with 🔁.
 
 ---
 
-## Paso 0 — Análisis del repositorio y del esquema actual
+## Step 0 — Repository and current-schema analysis
 
 **Prompt:**
-> "Analiza el repositorio sin modificar nada. Quiero el inventario de entidades
-> ya presentes en `backend/prisma/schema.prisma`, el estado de
-> `backend/prisma/migrations/`, el `DATABASE_URL` efectivo (resolviendo la
-> interpolación de variables del `.env`) y si hay un PostgreSQL accesible.
-> Resume las brechas respecto al ERD objetivo."
+> "Analyze the repository without modifying anything. I want the inventory of
+> entities already present in `backend/prisma/schema.prisma`, the state of
+> `backend/prisma/migrations/`, the effective `DATABASE_URL` (resolving the
+> variable interpolation from `.env`) and whether there is a reachable
+> PostgreSQL. Summarize the gaps against the target ERD."
 
-**Hallazgos:**
-- `schema.prisma` ya define `Candidate`, `Education`, `WorkExperience`,
-  `Resume`. El módulo ATS del ERD (Company, Position, InterviewFlow…) **no
-  existe**.
-- `migrations/` solo contiene `migration_lock.toml` (`provider = "postgresql"`):
-  **no hay migraciones versionadas todavía**, por lo que la migración que genere
-  será la `init` real del histórico de Prisma.
-- `.env` define `DATABASE_URL` con interpolación
+**Findings:**
+- `schema.prisma` already defines `Candidate`, `Education`, `WorkExperience`,
+  `Resume`. The ATS module from the ERD (Company, Position, InterviewFlow…)
+  **does not exist**.
+- `migrations/` only contains `migration_lock.toml` (`provider = "postgresql"`):
+  **there are no versioned migrations yet**, so the migration I generate will be
+  the real `init` of Prisma's history.
+- `.env` defines `DATABASE_URL` with interpolation
   `postgresql://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}` →
-  resuelve a `postgresql://LTIdbUser:***@localhost:5432/LTIdb`.
-- Aprovisiono rol `LTIdbUser` (LOGIN, CREATEDB) y base `LTIdb` en el Postgres
-  local para que el `.env` funcione **sin tocarlo**.
+  resolves to `postgresql://LTIdbUser:***@localhost:5432/LTIdb`.
+- I provision the `LTIdbUser` role (LOGIN, CREATEDB) and the `LTIdb` database in
+  the local Postgres so that `.env` works **without touching it**.
 
-**🔁 2ª pasada — análisis de identidad de entidades.** El `CANDIDATE` del ERD
-(firstName, lastName, email, phone, address) es **isomorfo** al `Candidate`
-existente. Decisión: **no introduzco una entidad duplicada**; extiendo la
-existente con la relación inversa `applications Application[]`. Esto evita una
-violación de normalización por duplicación de la entidad candidato y mantiene
-una única fuente de verdad.
+**🔁 2nd pass — entity-identity analysis.** The ERD's `CANDIDATE`
+(firstName, lastName, email, phone, address) is **isomorphic** to the existing
+`Candidate`. Decision: **I do not introduce a duplicate entity**; I extend the
+existing one with the inverse relation `applications Application[]`. This avoids
+a normalization violation by duplicating the candidate entity and keeps a single
+source of truth.
 
 ---
 
-## Paso 1 — Conversión del ERD (Mermaid) a modelo Prisma con normalización
+## Step 1 — Converting the ERD (Mermaid) into a Prisma model with normalization
 
 **Prompt:**
-> "Convierte el ERD Mermaid a modelos Prisma para PostgreSQL respetando las 9
-> entidades y todas las relaciones. El ERD usa `string` para todo y no tiene
-> índices ni constraints: normalízalo hasta 3FN, sustituye los `string` de
-> dominio acotado por tipos correctos y justifica cada decisión contra las
-> formas normales."
+> "Convert the Mermaid ERD into Prisma models for PostgreSQL, honoring the 9
+> entities and all relations. The ERD uses `string` for everything and has no
+> indexes or constraints: normalize it up to 3NF, replace the bounded-domain
+> `string`s with correct types and justify each decision against the normal
+> forms."
 
-### Decisiones de normalización (1FN → BCNF)
+### Normalization decisions (1NF → BCNF)
 
-- **1FN (atomicidad):** todos los atributos son escalares; no hay columnas
-  multivaluadas. Las colecciones (los pasos de un flujo, las candidaturas de una
-  posición) se modelan como **tablas hijas con FK**, no como listas en una celda.
-- **2FN (dependencia plena de la PK):** todas las tablas usan una PK sintética
-  `id` de una sola columna (`@id @default(autoincrement())`), de modo que no
-  caben dependencias parciales sobre PKs compuestas.
-- **3FN / BCNF (sin dependencias transitivas):** los atributos descriptivos de
-  un flujo viven en `InterviewFlow`/`InterviewType`, no repetidos en
-  `InterviewStep`. El detalle de empresa no se copia en `Position`
-  (relación por FK `companyId`). Los valores de `status`/`role`/`result` se
-  externalizan a **ENUM** en lugar de repetir strings por fila.
+- **1NF (atomicity):** all attributes are scalar; there are no multi-valued
+  columns. Collections (the steps of a flow, the applications of a position) are
+  modeled as **child tables with FKs**, not as lists in a single cell.
+- **2NF (full dependency on the PK):** every table uses a single-column synthetic
+  PK `id` (`@id @default(autoincrement())`), so no partial dependencies on
+  composite PKs are possible.
+- **3NF / BCNF (no transitive dependencies):** a flow's descriptive attributes
+  live in `InterviewFlow`/`InterviewType`, not repeated in `InterviewStep`.
+  Company detail is not copied into `Position` (relation via FK `companyId`). The
+  `status`/`role`/`result` values are externalized into **ENUM**s instead of
+  repeating strings per row.
 
-### Sustitución de `string` libre por ENUM nativo (integridad de dominio)
+### Replacing free `string` with native ENUM (domain integrity)
 
-El ERD declara `status`, `role`, `result`, `employment_type` como `string`, lo
-que permite valores inconsistentes (`"open"` vs `"OPEN"`). Los convierto a
-**enums nativos de PostgreSQL** — equivalen a un `CHECK` cerrado y son más
-eficientes en almacenamiento que `VARCHAR`:
+The ERD declares `status`, `role`, `result`, `employment_type` as `string`,
+which allows inconsistent values (`"open"` vs `"OPEN"`). I convert them into
+**native PostgreSQL enums** — they are equivalent to a closed `CHECK` and are
+more storage-efficient than `VARCHAR`:
 
 ```prisma
 enum PositionStatus    { DRAFT OPEN PAUSED CLOSED ARCHIVED }
@@ -85,62 +85,64 @@ enum EmployeeRole      { RECRUITER HIRING_MANAGER INTERVIEWER ADMIN }
 enum EmploymentType    { FULL_TIME PART_TIME CONTRACT INTERNSHIP TEMPORARY FREELANCE }
 ```
 
-### Tipos de dato correctos (en vez de `string` genérico)
+### Correct data types (instead of a generic `string`)
 
-| Campo(s) | Tipo elegido | Motivo |
-|----------|--------------|--------|
-| `salaryMin`, `salaryMax` | `Decimal(12,2)` | Dinero: nunca `float` (errores de redondeo IEEE-754). |
-| `applicationDeadline`, `applicationDate`, `interviewDate` | `Date` | Fechas de negocio sin componente horario. |
-| `description`, `requirements`, `responsibilities`, `benefits`, `jobDescription`, `companyDescription`, `notes` | `Text` | Texto largo sin límite artificial de `VARCHAR`. |
-| `title`, `location`, `contactInfo`, `name`, `email` | `VarChar(n)` | Cadenas cortas acotadas. |
+| Field(s) | Chosen type | Reason |
+|----------|-------------|--------|
+| `salaryMin`, `salaryMax` | `Decimal(12,2)` | Money: never `float` (IEEE-754 rounding errors). |
+| `applicationDeadline`, `applicationDate`, `interviewDate` | `Date` | Business dates with no time component. |
+| `description`, `requirements`, `responsibilities`, `benefits`, `jobDescription`, `companyDescription`, `notes` | `Text` | Long text with no artificial `VARCHAR` limit. |
+| `title`, `location`, `contactInfo`, `name`, `email` | `VarChar(n)` | Short, bounded strings. |
 
-### Cardinalidad de `Position` ↔ `InterviewFlow`
+### Cardinality of `Position` ↔ `InterviewFlow`
 
-El ERD la dibuja `||--||` (1:1). La modelo **N:1** (`Position.interviewFlowId` →
-`InterviewFlow.id`, sin `UNIQUE`): un flujo de entrevistas es un **activo
-reutilizable** y forzar 1:1 obligaría a clonar el flujo y sus pasos por cada
-oferta — redundancia que rompe 3FN. Documentada como desviación consciente del
-ERD literal.
+The ERD draws it as `||--||` (1:1). I model it as **N:1**
+(`Position.interviewFlowId` → `InterviewFlow.id`, without `UNIQUE`): an interview
+flow is a **reusable asset**, and forcing 1:1 would require cloning the flow and
+its steps for every opening — redundancy that breaks 3NF. Documented as a
+conscious deviation from the literal ERD.
 
-**🔁 2ª pasada — defaults y nullabilidad.** Añado defaults de dominio
+**🔁 2nd pass — defaults and nullability.** I add domain defaults
 (`status DRAFT`, `isVisible false`, `role INTERVIEWER`, `isActive true`,
-`result PENDING`, `applicationDate now()`) y marco como opcional (`?`) todo el
-detalle no imprescindible de la oferta, dejando `NOT NULL` solo lo necesario para
-operar (título, FKs). Así el `INSERT` del caso común es mínimo y consistente.
+`result PENDING`, `applicationDate now()`) and mark as optional (`?`) all the
+non-essential opening detail, keeping `NOT NULL` only on what's required to
+operate (title, FKs). This way the common-case `INSERT` is minimal and
+consistent.
 
 ---
 
-## Paso 2 — Índices y restricciones UNIQUE
+## Step 2 — Indexes and UNIQUE constraints
 
 **Prompt:**
-> "Diseña la estrategia de índices. Regla: indexar toda columna de FK (Postgres
-> no las indexa sola y son las columnas de JOIN), más las columnas de los
-> `WHERE`/`ORDER BY` más frecuentes del backlog. Añade UNIQUE donde lo exija la
-> lógica de negocio. Evita índices redundantes con los que ya crea cada UNIQUE."
+> "Design the indexing strategy. Rule: index every FK column (Postgres does not
+> index them automatically and they are the JOIN columns), plus the columns in
+> the most frequent `WHERE`/`ORDER BY` of the backlog. Add UNIQUE where the
+> business logic requires it. Avoid indexes that are redundant with the ones each
+> UNIQUE already creates."
 
-| Índice / constraint | Tipo | Justificación (carga de trabajo) |
-|---------------------|------|----------------------------------|
-| FK: `companyId`, `interviewFlowId`, `interviewTypeId`, `positionId`, `candidateId`, `applicationId`, `interviewStepId`, `employeeId` | B-tree | Acelera los JOIN del pipeline (todas las relaciones). |
-| `@@unique([positionId, candidateId])` en `Application` | UNIQUE | Un candidato no puede aplicar dos veces a la misma posición. |
-| `@@unique([interviewFlowId, orderIndex])` en `InterviewStep` | UNIQUE | Orden de paso único dentro de un flujo. |
-| `@unique` en `Company.name`, `Employee.email`, `InterviewType.name`, `Candidate.email` | UNIQUE | Claves naturales / identidad. |
-| `@@index([status, isVisible])` en `Position` | B-tree compuesto | Consulta del portal público: ofertas `OPEN` + visibles. Orden de columnas por selectividad. |
-| `@@index([status])` en `Application`; `@@index([isActive])` en `Employee` | B-tree | Filtros del panel de recruiter. |
+| Index / constraint | Type | Justification (workload) |
+|--------------------|------|--------------------------|
+| FK: `companyId`, `interviewFlowId`, `interviewTypeId`, `positionId`, `candidateId`, `applicationId`, `interviewStepId`, `employeeId` | B-tree | Speeds up the pipeline JOINs (all relations). |
+| `@@unique([positionId, candidateId])` on `Application` | UNIQUE | A candidate cannot apply twice to the same position. |
+| `@@unique([interviewFlowId, orderIndex])` on `InterviewStep` | UNIQUE | Unique step order within a flow. |
+| `@unique` on `Company.name`, `Employee.email`, `InterviewType.name`, `Candidate.email` | UNIQUE | Natural keys / identity. |
+| `@@index([status, isVisible])` on `Position` | Composite B-tree | Public-portal query: `OPEN` + visible openings. Column order by selectivity. |
+| `@@index([status])` on `Application`; `@@index([isActive])` on `Employee` | B-tree | Recruiter-dashboard filters. |
 
-**🔁 2ª pasada — anti-redundancia.** Verifico que **no** creo un `@@index` sobre
-columnas que ya cubre un `@unique`/`@@unique` (que genera su propio índice B-tree
-implícito), para no pagar coste de escritura doble. El compuesto
-`(status, isVisible)` se ordena con la columna más selectiva primero para que sea
-útil también en consultas que solo filtran por `status`.
+**🔁 2nd pass — anti-redundancy.** I verify that I do **not** create an `@@index`
+on columns already covered by a `@unique`/`@@unique` (which generates its own
+implicit B-tree index), to avoid paying a double write cost. The composite
+`(status, isVisible)` is ordered with the most selective column first so it is
+also useful for queries that only filter by `status`.
 
 ---
 
-## Paso 3 — Generación y aplicación de la migración
+## Step 3 — Generating and applying the migration
 
 **Prompt:**
-> "Formatea y valida el schema; luego genera la migración con nombre
-> descriptivo y aplícala contra la BD de desarrollo. Muéstrame el SQL generado
-> íntegro antes de continuar."
+> "Format and validate the schema; then generate the migration with a descriptive
+> name and apply it against the development DB. Show me the full generated SQL
+> before continuing."
 
 ```bash
 npx prisma format
@@ -149,28 +151,29 @@ DATABASE_URL="postgresql://LTIdbUser:***@localhost:5432/LTIdb" \
   npx prisma migrate dev --name expand_ats_schema
 ```
 
-Genera `backend/prisma/migrations/20260621175254_expand_ats_schema/migration.sql`
-con el orden DDL correcto: `CREATE TYPE` (5 enums) → `CREATE TABLE` (12) →
-`CREATE [UNIQUE] INDEX` → `ALTER TABLE … ADD FOREIGN KEY`. Las FK se generan con
-`ON DELETE RESTRICT ON UPDATE CASCADE` (default de Prisma).
+This generates
+`backend/prisma/migrations/20260621175254_expand_ats_schema/migration.sql`
+with the correct DDL order: `CREATE TYPE` (5 enums) → `CREATE TABLE` (12) →
+`CREATE [UNIQUE] INDEX` → `ALTER TABLE … ADD FOREIGN KEY`. The FKs are generated
+with `ON DELETE RESTRICT ON UPDATE CASCADE` (Prisma default).
 
 ---
 
-## Paso 4 — 🔁 Revisión de la migración + CHECK constraints
+## Step 4 — 🔁 Migration review + CHECK constraints
 
-**Prompt (revisión obligatoria de DDL):**
-> "Revisa el SQL generado: ¿hay operaciones destructivas (DROP, ALTER que
-> trunque, CREATE UNIQUE sobre datos existentes)? ¿Falta integridad de dominio
-> expresable como CHECK? El material del módulo cita los CHECK como herramienta
-> clave; añádelos donde aporten."
+**Prompt (mandatory DDL review):**
+> "Review the generated SQL: are there destructive operations (DROP, truncating
+> ALTER, CREATE UNIQUE over existing data)? Is there domain integrity expressible
+> as a CHECK that's missing? The module material cites CHECKs as a key tool; add
+> them where they help."
 
-**Resultado de la revisión:**
-- Migración **puramente aditiva** (solo `CREATE`/`ADD`): **0 operaciones
-  destructivas** → segura de aplicar. Al ser la `init`, tampoco hay
-  `CREATE UNIQUE` sobre datos preexistentes.
-- Faltan **CHECK** de dominio. Prisma 5.x no los expresa en el schema, así que
-  los añado al final del `migration.sql` (no generan *drift* porque Prisma no
-  gestiona CHECK):
+**Review result:**
+- The migration is **purely additive** (only `CREATE`/`ADD`): **0 destructive
+  operations** → safe to apply. Being the `init`, there is also no
+  `CREATE UNIQUE` over pre-existing data.
+- Domain **CHECK**s are missing. Prisma 5.x does not express them in the schema,
+  so I add them at the end of `migration.sql` (they do not cause *drift* because
+  Prisma does not manage CHECKs):
 
 ```sql
 ALTER TABLE "Interview" ADD CONSTRAINT "Interview_score_range_chk"
@@ -179,38 +182,38 @@ ALTER TABLE "Position"  ADD CONSTRAINT "Position_salary_range_chk"
   CHECK ("salaryMin" IS NULL OR "salaryMax" IS NULL OR "salaryMax" >= "salaryMin");
 ```
 
-- Re-aplico de forma limpia con `npx prisma migrate reset --force` (la BD es
-  desechable y aún no hay datos productivos) para que el *checksum* de la
-  migración se recalcule e incluya los CHECK.
+- I re-apply cleanly with `npx prisma migrate reset --force` (the DB is
+  disposable and there is no production data yet) so that the migration's
+  *checksum* is recomputed and includes the CHECKs.
 
 ---
 
-## Paso 5 — Verificación de la estructura en PostgreSQL / PGAdmin
+## Step 5 — Verifying the structure in PostgreSQL / PGAdmin
 
 **Prompt:**
-> "Conéctate a la BD y verifica que la estructura es correcta, como haría en
-> PGAdmin: lista tablas, enums e índices de las tablas del pipeline, y confirma
-> que las FK existen."
+> "Connect to the DB and verify that the structure is correct, as I would in
+> PGAdmin: list tables, enums and indexes of the pipeline tables, and confirm the
+> FKs exist."
 
 ```sql
-\dt                                              -- 12 tablas de dominio + _prisma_migrations
+\dt                                              -- 12 domain tables + _prisma_migrations
 SELECT typname FROM pg_type WHERE typtype = 'e'; -- 5 enums
 SELECT tablename, indexname FROM pg_indexes
  WHERE tablename IN ('Position','Application','Interview');
 ```
 
-Confirmo: 12 tablas del dominio, los 5 enums y los índices esperados (PK, FK,
-UNIQUE y compuesto). Conexión OK con las credenciales del `.env`.
+I confirm: 12 domain tables, the 5 enums and the expected indexes (PK, FK,
+UNIQUE and composite). Connection OK with the `.env` credentials.
 
 ---
 
-## Paso 6 — Datos de prueba y consulta con JOINs
+## Step 6 — Test data and a JOIN query
 
 **Prompt:**
-> "Inserta un caso que recorra todo el flujo (Company → Employee → InterviewFlow
-> → InterviewType → InterviewStep → Position → Candidate → Application →
-> Interview) y ejecuta un JOIN que muestre el pipeline completo. Comprueba que la
-> UNIQUE rechaza una candidatura duplicada."
+> "Insert a case that traverses the whole flow (Company → Employee →
+> InterviewFlow → InterviewType → InterviewStep → Position → Candidate →
+> Application → Interview) and run a JOIN that shows the full pipeline. Check that
+> the UNIQUE rejects a duplicate application."
 
 ```sql
 SELECT c."firstName" || ' ' || c."lastName" AS candidato,
@@ -224,57 +227,58 @@ JOIN "Interview" i  ON i."applicationId" = a.id
 JOIN "Employee"  e  ON e.id = i."employeeId";
 ```
 
-Devuelve `Luis García | Backend Engineer | LTI Talent | INTERVIEW | PASSED | 9 |
-Ana Recruiter`. El segundo `INSERT` de la misma candidatura es rechazado:
+It returns `Luis García | Backend Engineer | LTI Talent | INTERVIEW | PASSED | 9 |
+Ana Recruiter`. The second `INSERT` of the same application is rejected:
 `duplicate key value violates unique constraint "Application_positionId_candidateId_key"`. ✅
 
-**🔁 2ª pasada — plan de ejecución.** Sobre el JOIN ejecuto
-`EXPLAIN (ANALYZE, BUFFERS)`. Con el volumen de prueba (1 fila/tabla) el
-planificador elige `Hash Join` + `Seq Scan`, que es **óptimo** a esa escala (un
-`Index Scan` sería más caro que leer la tabla entera). Los índices B-tree sobre
-las FK están en su sitio para que el planificador conmute a `Index Scan` /
-`Nested Loop` cuando las tablas crezcan; lo valido revisando que las condiciones
-de JOIN (`Hash Cond: a."candidateId" = c.id`, etc.) son exactamente las columnas
-indexadas.
+**🔁 2nd pass — execution plan.** On the JOIN I run
+`EXPLAIN (ANALYZE, BUFFERS)`. With the test volume (1 row/table) the planner
+chooses `Hash Join` + `Seq Scan`, which is **optimal** at that scale (an
+`Index Scan` would be costlier than reading the whole table). The B-tree indexes
+on the FKs are in place so the planner switches to `Index Scan` /
+`Nested Loop` as the tables grow; I validate it by checking that the JOIN
+conditions (`Hash Cond: a."candidateId" = c.id`, etc.) are exactly the indexed
+columns.
 
 ---
 
-## Paso 7 — Tests de integración automatizados
+## Step 7 — Automated integration tests
 
 **Prompt:**
-> "Escribe tests (Jest + Prisma Client, como el resto del proyecto) que validen:
-> inserción del flujo completo, JOIN con datos relacionados, y que UNIQUE y los
-> dos CHECK rechazan datos inválidos. Idempotentes: limpia los datos al
-> terminar."
+> "Write tests (Jest + Prisma Client, like the rest of the project) that
+> validate: insertion of the full flow, a JOIN with related data, and that UNIQUE
+> and the two CHECKs reject invalid data. Idempotent: clean up the data when
+> finished."
 
-`backend/prisma/schema.integration.test.ts` con 5 casos:
-1. Inserta el flujo completo de contratación.
-2. JOIN (`prisma.application.findFirstOrThrow` con `include` anidado) devuelve el
-   pipeline con datos relacionados.
-3. Rechaza candidatura duplicada (UNIQUE).
-4. Rechaza `score` fuera de rango (CHECK 0..100).
-5. Rechaza `salaryMax < salaryMin` (CHECK).
+`backend/prisma/schema.integration.test.ts` with 5 cases:
+1. Inserts the complete hiring flow.
+2. JOIN (`prisma.application.findFirstOrThrow` with nested `include`) returns the
+   pipeline with related data.
+3. Rejects a duplicate application (UNIQUE).
+4. Rejects an out-of-range `score` (CHECK 0..100).
+5. Rejects `salaryMax < salaryMin` (CHECK).
 
 ```bash
 DATABASE_URL="postgresql://…/LTIdb" npx jest prisma/schema.integration.test.ts
 # Tests: 5 passed, 5 total ✅
 ```
 
-El `afterAll` borra en orden inverso a las dependencias (FK `RESTRICT`) para que
-el test sea reejecutable sin dejar residuos.
+The `afterAll` deletes in reverse dependency order (FK `RESTRICT`) so the test is
+re-runnable without leaving residue.
 
 ---
 
-## Paso 8 — Entrega (rama, commit, push, PR)
+## Step 8 — Delivery (branch, commit, push, PR)
 
 **Prompt:**
-> "Crea la rama `db-iniciales`, añade SOLO los cambios de modelo y la migración
-> `.sql` en `backend/prisma` y `prompts/prompts-iniciales.md`. Revierte los lock
-> files tocados por `npm install`. Commit descriptivo, push y abre el PR."
+> "Create the `db-iniciales` branch, add ONLY the model changes and the `.sql`
+> migration under `backend/prisma` plus `prompts/prompts-iniciales.md`. Revert
+> the lock files touched by `npm install`. Descriptive commit, push and open the
+> PR."
 
 ```bash
 git checkout -b db-iniciales
-git checkout -- backend/package-lock.json   # revierto ruido de npm install
+git checkout -- backend/package-lock.json   # revert npm install noise
 git add backend/prisma/schema.prisma \
         backend/prisma/migrations/20260621175254_expand_ats_schema \
         prompts/prompts-iniciales.md
@@ -285,14 +289,14 @@ gh pr create --base main --head db-iniciales
 
 ---
 
-## Resumen de buenas prácticas aplicadas
+## Summary of applied best practices
 
-| Práctica | Aplicación concreta |
-|----------|---------------------|
-| **Normalización 1FN–BCNF** | Atributos atómicos; PK sintética de una columna; sin dependencias transitivas; dominios acotados externalizados a ENUM. |
-| **Índices** | B-tree en todas las FK (JOINs), en filtros frecuentes y compuesto `(status, isVisible)` ordenado por selectividad. |
-| **Integridad referencial** | FK explícitas con `ON DELETE RESTRICT` en todas las relaciones. |
-| **Integridad de dominio** | ENUM + CHECK (rango de `score`, coherencia de salario) + UNIQUE (candidatura única, orden de paso único, claves naturales). |
-| **Tipos correctos** | `Decimal(12,2)` (dinero), `Date` (fechas de negocio), `Text` (texto largo). |
-| **Revisión de migraciones** | 2ª pasada verificando ausencia de DDL destructivo antes de aplicar. |
-| **Verificación real** | Inspección `psql`/PGAdmin + datos de prueba + JOIN + `EXPLAIN ANALYZE` + 5 tests de integración. |
+| Practice | Concrete application |
+|----------|----------------------|
+| **Normalization 1NF–BCNF** | Atomic attributes; single-column synthetic PK; no transitive dependencies; bounded domains externalized to ENUM. |
+| **Indexes** | B-tree on every FK (JOINs), on frequent filters and a composite `(status, isVisible)` ordered by selectivity. |
+| **Referential integrity** | Explicit FKs with `ON DELETE RESTRICT` on all relations. |
+| **Domain integrity** | ENUM + CHECK (`score` range, salary coherence) + UNIQUE (single application, unique step order, natural keys). |
+| **Correct types** | `Decimal(12,2)` (money), `Date` (business dates), `Text` (long text). |
+| **Migration review** | 2nd pass verifying the absence of destructive DDL before applying. |
+| **Real verification** | `psql`/PGAdmin inspection + test data + JOIN + `EXPLAIN ANALYZE` + 5 integration tests. |
